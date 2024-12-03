@@ -1,78 +1,141 @@
-import axios from 'axios';
-import express from 'express';
+// customers.routes.ts
+import { Router, Request, Response } from 'express';
+import axios, { AxiosError } from 'axios';
 
-const router = express.Router();
+// Interfaces
+interface Address {
+  street: string;
+  number: string;
+  complement?: string;
+  zip_code: string;
+  neighborhood: string;
+  city: string;
+  state: string;
+  country: string;
+  line_1?: string;
+  line_2?: string;
+}
 
-const api = axios.create({
-  baseURL: 'https://api.pagar.me/core/v5',
-  headers: {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${Buffer.from(process.env.PAGARME_API_KEY + ':').toString('base64')}`,
-  },
-});
+interface Phone {
+  country_code: string;
+  area_code: string;
+  number: string;
+  type?: 'home' | 'mobile' | 'work';
+}
 
-// Endpoint para criar um proprietário
-router.post('/homeowners', async (req:any, res:any) => {
-  try {
-    const data = req.body;
+interface CustomerRequest {
+  name: string;
+  email: string;
+  code?: string;
+  document: string;
+  document_type?: 'CPF' | 'CNPJ' | 'PASSPORT';
+  type?: 'individual' | 'company';
+  gender?: 'male' | 'female';
+  address?: Address;
+  phones?: {
+    home_phone?: Phone;
+    mobile_phone?: Phone;
+    work_phone?: Phone;
+  };
+  birthdate?: string;
+  metadata?: Record<string, unknown>;
+}
 
-    if (!data.default_bank_account) {
-      return res.status(400).json({ message: 'Bank account information is required.' });
-    }
+interface PagarMeResponse {
+  id: string;
+  name: string;
+  email: string;
+  [key: string]: any;
+}
 
-    const response = await api.post('/customers', {
-      name: data.name,
-      email: data.email,
-      description: 'Homeowner account',
-      document: data.document,
-      type: data.default_bank_account.holder_type === 'cpf' ? 'individual' : 'company',
-      default_bank_account: {
-        holder_name: data.default_bank_account.holder_name,
-        document_type: data.default_bank_account.holder_type === 'cpf' ? 'individual' : 'company',
-        holder_document: data.default_bank_account.holder_document,
-        bank: data.default_bank_account.bank,
-        branch_number: data.default_bank_account.branch_number,
-        account_number: data.default_bank_account.account_number,
-        account_check_digit: data.default_bank_account.account_check_digit,
-        type: 'checking',
-      },
-      metadata: {
-        phone: data.metadata.phone,
-      },
-      automatic_anticipation_settings: {
-        enabled: true,
-        type: 'full',
-        volume_percentage: 100,
-        delay: 0,
-      },
-      transfer_settings: {
-        transfer_enabled: true,
-        transfer_interval: 'daily',
-        transfer_day: 0,
-      },
-      code: data.document,
-      payment_mode: 'bank_transfer',
-    });
+interface ErrorResponse {
+  error: string;
+}
 
-    // Enviar resposta para o frontend
-    res.status(200).json({
-      id: response.data.id,
-      status: response.data.status,
-      type: response.data.type,
-    });
-  } catch (error: any) {
-    // Tratar erros da API da Pagar.me
-    if (error.response) {
-      return res.status(error.response.status).json({
-        message: error.response.data.message,
-        code: error.response.data.code,
-        details: error.response.data,
-      });
-    }
-    console.log(error);
-    // Tratar erros gerais
-    res.status(500).json({ message: 'An unexpected error occurred.' });
+class CustomerError extends Error {
+  constructor(public statusCode: number, message: string) {
+    super(message);
+    this.name = 'CustomerError';
   }
-});
+}
 
-export default router;
+const validateCustomerData = (data: CustomerRequest): void => {
+  if (!data.name?.trim()) {
+    throw new CustomerError(400, 'Nome é obrigatório');
+  }
+
+  if (!data.email?.trim()) {
+    throw new CustomerError(400, 'Email é obrigatório');
+  }
+
+  if (!data.document?.trim()) {
+    throw new CustomerError(400, 'Documento é obrigatório');
+  }
+
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(data.email)) {
+    throw new CustomerError(400, 'Formato de email inválido');
+  }
+};
+
+// Criando o router
+const customerRouter = Router();
+
+// Definindo a rota POST
+customerRouter.post(
+  '/customers',
+  async (
+    req: any,
+    res: any
+  ) => {
+    try {
+      const customerData = req.body;
+
+      // Validar dados
+      validateCustomerData(customerData);
+
+      // Configuração do cliente Pagar.me
+      const pagarmeConfig = {
+        baseURL: 'https://api.pagar.me/core/v5',
+        headers: {
+          'Authorization': `Basic ${Buffer.from(process.env.PAGARME_API_KEY || '').toString('base64')}`,
+          'Content-Type': 'application/json'
+        }
+      };
+
+      // Valores default
+      const enrichedCustomerData: CustomerRequest = {
+        ...customerData,
+        document_type: customerData.document_type || 'CPF',
+        type: customerData.type || 'individual'
+      };
+
+      // Fazer requisição para a API da Pagar.me
+      const response = await axios.post<PagarMeResponse>(
+        '/customers',
+        enrichedCustomerData,
+        pagarmeConfig
+      );
+
+      return res.status(201).json(response.data);
+
+    } catch (error) {
+      console.error('Erro ao cadastrar cliente:', error);
+
+      if (error instanceof CustomerError) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
+
+      if (axios.isAxiosError(error)) {
+        const axiosError = error as AxiosError<any>;
+        return res.status(axiosError.response?.status || 500).json({
+          error: axiosError.response?.data?.message || 'Erro ao processar requisição na Pagar.me'
+        });
+      }
+
+      return res.status(500).json({ error: 'Erro interno do servidor' });
+    }
+  }
+);
+
+export default customerRouter;
